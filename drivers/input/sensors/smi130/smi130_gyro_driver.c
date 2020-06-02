@@ -290,6 +290,7 @@ struct smi_gyro_client_data {
 	ktime_t work_delay_kt;
 	uint8_t gpio_pin;
 	int16_t IRQ;
+	struct work_struct irq_work;
 #ifdef CONFIG_ENABLE_SMI_ACC_GYRO_BUFFERING
 	bool read_gyro_boot_sample;
 	int gyro_bufsample_cnt;
@@ -421,7 +422,7 @@ static int smi_gyro_check_chip_id(struct i2c_client *client)
 static void smi_gyro_dump_reg(struct i2c_client *client)
 {
 	int i;
-	u8 dbg_buf[64] = {0};
+	u8 dbg_buf[64];
 	u8 dbg_buf_str[64 * 3 + 1] = "";
 
 	for (i = 0; i < BYTES_PER_LINE; i++) {
@@ -1767,7 +1768,7 @@ static int smi130_gyro_early_buff_init(struct smi_gyro_client_data *client_data)
 	if (!client_data->smi_gyro_cachepool) {
 		PERR("smi_gyro_cachepool cache create failed\n");
 		err = -ENOMEM;
-		return 0;
+		goto clean_exit1;
 	}
 
 	for (i = 0; i < SMI_GYRO_MAXSAMPLE; i++) {
@@ -1776,7 +1777,7 @@ static int smi130_gyro_early_buff_init(struct smi_gyro_client_data *client_data)
 					GFP_KERNEL);
 		if (!client_data->smi130_gyro_samplist[i]) {
 			err = -ENOMEM;
-			goto clean_exit1;
+			goto clean_exit2;
 		}
 	}
 
@@ -1785,7 +1786,7 @@ static int smi130_gyro_early_buff_init(struct smi_gyro_client_data *client_data)
 	if (!client_data->gyrobuf_dev) {
 		err = -ENOMEM;
 		PERR("input device allocation failed\n");
-		goto clean_exit1;
+		goto clean_exit3;
 	}
 	client_data->gyrobuf_dev->name = "smi130_gyrobuf";
 	client_data->gyrobuf_dev->id.bustype = BUS_I2C;
@@ -1806,38 +1807,25 @@ static int smi130_gyro_early_buff_init(struct smi_gyro_client_data *client_data)
 	if (err) {
 		PERR("unable to register input device %s\n",
 				client_data->gyrobuf_dev->name);
-		goto clean_exit2;
+		goto clean_exit3;
 	}
 
 	client_data->gyro_buffer_smi130_samples = true;
 
 	smi130_gyro_set_mode(SMI130_GYRO_MODE_NORMAL);
-	smi130_gyro_delay(5);
-
 	smi130_gyro_set_bw(5);
-	smi130_gyro_delay(5);
-
 	smi130_gyro_set_range_reg(4);
-	smi130_gyro_delay(5);
-
-	smi130_gyro_set_mode(SMI130_GYRO_MODE_NORMAL);
-	smi130_gyro_delay(5);
-
-	smi130_gyro_set_range_reg(4);
-	smi130_gyro_delay(5);
-
-	smi130_gyro_set_data_en(SMI130_GYRO_ENABLE);
 
 	return 1;
 
-clean_exit2:
+clean_exit3:
 	input_free_device(client_data->gyrobuf_dev);
-clean_exit1:
+clean_exit2:
 	for (i = 0; i < SMI_GYRO_MAXSAMPLE; i++)
 		kmem_cache_free(client_data->smi_gyro_cachepool,
 				client_data->smi130_gyro_samplist[i]);
+clean_exit1:
 	kmem_cache_destroy(client_data->smi_gyro_cachepool);
-
 	return 0;
 }
 
@@ -1852,11 +1840,6 @@ static void smi130_gyro_input_cleanup(struct smi_gyro_client_data *client_data)
 				client_data->smi130_gyro_samplist[i]);
 	kmem_cache_destroy(client_data->smi_gyro_cachepool);
 }
-
-static int smi130_enable_int1(void)
-{
-	return smi130_gyro_set_data_en(SMI130_GYRO_DISABLE);
-}
 #else
 static int smi130_gyro_early_buff_init(struct smi_gyro_client_data *client_data)
 {
@@ -1865,17 +1848,14 @@ static int smi130_gyro_early_buff_init(struct smi_gyro_client_data *client_data)
 static void smi130_gyro_input_cleanup(struct smi_gyro_client_data *client_data)
 {
 }
-static int smi130_enable_int1(void)
-{
-	return smi130_gyro_set_data_en(SMI130_GYRO_ENABLE);
-}
 #endif
 
 
 #if defined(SMI130_GYRO_ENABLE_INT1) || defined(SMI130_GYRO_ENABLE_INT2)
-static irqreturn_t smi130_gyro_irq_work_func(int irq, void *handle)
+static void smi130_gyro_irq_work_func(struct work_struct *work)
 {
-	struct smi_gyro_client_data *client_data = handle;
+	struct smi_gyro_client_data *client_data = container_of(work,
+		struct smi_gyro_client_data, irq_work);
 	struct smi130_gyro_data_t gyro_data;
 	struct timespec ts;
 	ts = ns_to_timespec(client_data->timestamp);
@@ -1896,14 +1876,14 @@ static irqreturn_t smi130_gyro_irq_work_func(int irq, void *handle)
 	input_sync(client_data->input);
 	store_gyro_boot_sample(client_data, gyro_data.datax,
 			gyro_data.datay, gyro_data.dataz, ts);
-	return IRQ_HANDLED;
 }
 
 static irqreturn_t smi_gyro_irq_handler(int irq, void *handle)
 {
 	struct smi_gyro_client_data *client_data = handle;
 	client_data->timestamp= smi130_gyro_get_alarm_timestamp();
-	return IRQ_WAKE_THREAD;
+	schedule_work(&client_data->irq_work);
+	return IRQ_HANDLED;
 }
 #endif
 static int smi_gyro_probe(struct i2c_client *client, const struct i2c_device_id *id)
@@ -2024,7 +2004,7 @@ static int smi_gyro_probe(struct i2c_client *client, const struct i2c_device_id 
 	smi130_gyro_delay(5);
 	err += smi130_gyro_set_int_data(SMI130_GYRO_INT1_DATA, SMI130_GYRO_ENABLE);
 	smi130_gyro_delay(5);
-	err += smi130_enable_int1();
+	err += smi130_gyro_set_data_en(SMI130_GYRO_ENABLE);
 	smi130_gyro_delay(5);
 	/*default odr is 100HZ*/
 	err += SMI_GYRO_CALL_API(set_bw)(7);
@@ -2075,16 +2055,17 @@ static int smi_gyro_probe(struct i2c_client *client, const struct i2c_device_id 
 			PDEBUG("request failed\n");
 		}
 		client_data->IRQ = gpio_to_irq(client_data->gpio_pin);
-		err = request_threaded_irq(client_data->IRQ,
-				smi_gyro_irq_handler, smi130_gyro_irq_work_func,
-				IRQF_TRIGGER_RISING, SENSOR_NAME, client_data);
+		err = request_irq(client_data->IRQ, smi_gyro_irq_handler,
+				IRQF_TRIGGER_RISING,
+				SENSOR_NAME, client_data);
 		if (err < 0)
 			PDEBUG("request handle failed\n");
 	}
+	INIT_WORK(&client_data->irq_work, smi130_gyro_irq_work_func);
 #endif
 
 	err = smi130_gyro_early_buff_init(client_data);
-	if (!err)
+	if (err)
 		return err;
 
 	PINFO("sensor %s probed successfully", SENSOR_NAME);
