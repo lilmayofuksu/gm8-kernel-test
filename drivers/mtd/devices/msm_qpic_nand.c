@@ -1788,7 +1788,7 @@ static int msm_nand_read_oob(struct mtd_info *mtd, loff_t from,
 	struct msm_nand_chip *chip = &info->nand_chip;
 	struct flash_identification *flash_dev = &info->flash_dev;
 	uint32_t cwperpage = (mtd->writesize >> 9);
-	int err, pageerr = 0, rawerr = 0, submitted_num_desc = 0, count = 0;
+	int err, pageerr = 0, rawerr = 0, submitted_num_desc = 0;
 	uint32_t n = 0, pages_read = 0;
 	uint32_t ecc_errors = 0, total_ecc_errors = 0, ecc_capability;
 	struct msm_nand_rw_params rw_params;
@@ -2105,7 +2105,7 @@ free_dma:
 	 */
 	while (fix_data_in_pages) {
 		int temp_page = 0, oobsize = rw_params.cwperpage << 2;
-		int offset = 0;
+		int count = 0, offset = 0;
 
 		temp_page = fix_data_in_pages & BIT_MASK(0);
 		fix_data_in_pages = fix_data_in_pages >> 1;

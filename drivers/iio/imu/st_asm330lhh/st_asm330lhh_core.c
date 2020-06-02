@@ -324,7 +324,7 @@ static int st_asm330lhh_read_oneshot(struct st_asm330lhh_sensor *sensor,
 				     u8 addr, int *val)
 {
 	int err, delay;
-	__le16 data = 0;
+	__le16 data;
 
 	if (sensor->id == ST_ASM330LHH_ID_TEMP) {
 		u8 status;
@@ -841,7 +841,6 @@ static void st_asm330lhh_enable_acc_gyro(struct st_asm330lhh_hw *hw)
 	struct st_asm330lhh_sensor *sensor;
 	int  acc_gain = ST_ASM330LHH_ACC_FS_2G_GAIN;
 	int  gyro_gain = ST_ASM330LHH_GYRO_FS_125_GAIN;
-	int  delay;
 
 	for (i = 0; i < ST_ASM330LHH_ID_MAX; i++) {
 		if (!hw->iio_devs[i])
@@ -849,29 +848,16 @@ static void st_asm330lhh_enable_acc_gyro(struct st_asm330lhh_hw *hw)
 		sensor = iio_priv(hw->iio_devs[i]);
 		sensor->odr = 104;
 		sensor->watermark = 30;
-		delay = 1000000 / sensor->odr;
+		st_asm330lhh_update_fifo(hw->iio_devs[i], false);
 
-		if (sensor->id == ST_ASM330LHH_ID_ACC) {
+		if (sensor->id == ST_ASM330LHH_ID_ACC)
 			st_asm330lhh_set_full_scale(sensor, acc_gain);
-			usleep_range(delay, 2 * delay);
-			st_asm330lhh_set_odr(sensor, sensor->odr);
-			usleep_range(delay, 2 * delay);
-			st_asm330lhh_update_watermark(sensor,
-					sensor->watermark);
-			usleep_range(delay, 2 * delay);
-			st_asm330lhh_update_fifo(hw->iio_devs[i], true);
-			usleep_range(delay, 2 * delay);
-		} else if (sensor->id == ST_ASM330LHH_ID_GYRO) {
+		else if (sensor->id == ST_ASM330LHH_ID_GYRO)
 			st_asm330lhh_set_full_scale(sensor, gyro_gain);
-			usleep_range(delay, 2 * delay);
-			st_asm330lhh_set_odr(sensor, sensor->odr);
-			usleep_range(delay, 2 * delay);
-			st_asm330lhh_update_watermark(sensor,
-					sensor->watermark);
-			usleep_range(delay, 2 * delay);
-			st_asm330lhh_update_fifo(hw->iio_devs[i], true);
-			usleep_range(delay, 2 * delay);
-		}
+
+		st_asm330lhh_update_watermark(sensor, sensor->watermark);
+
+		st_asm330lhh_update_fifo(hw->iio_devs[i], true);
 	}
 }
 
@@ -899,7 +885,7 @@ static int asm330_acc_gyro_early_buff_init(struct st_asm330lhh_hw *hw)
 		dev_err(hw->dev,
 				"asm_acc_cachepool cache create failed\n");
 		err = -ENOMEM;
-		return 0;
+		goto clean_exit1;
 	}
 
 	for (i = 0; i < ASM_MAXSAMPLE; i++) {
@@ -908,7 +894,7 @@ static int asm330_acc_gyro_early_buff_init(struct st_asm330lhh_hw *hw)
 					GFP_KERNEL);
 		if (!acc->asm_samplist[i]) {
 			err = -ENOMEM;
-			goto clean_exit1;
+			goto clean_exit2;
 		}
 	}
 
@@ -919,7 +905,7 @@ static int asm330_acc_gyro_early_buff_init(struct st_asm330lhh_hw *hw)
 		dev_err(hw->dev,
 				"asm_gyro_cachepool cache create failed\n");
 		err = -ENOMEM;
-		goto clean_exit1;
+		goto clean_exit3;
 	}
 
 	for (i = 0; i < ASM_MAXSAMPLE; i++) {
@@ -928,7 +914,7 @@ static int asm330_acc_gyro_early_buff_init(struct st_asm330lhh_hw *hw)
 					GFP_KERNEL);
 		if (!gyro->asm_samplist[i]) {
 			err = -ENOMEM;
-			goto clean_exit2;
+			goto clean_exit4;
 		}
 	}
 
@@ -936,7 +922,7 @@ static int asm330_acc_gyro_early_buff_init(struct st_asm330lhh_hw *hw)
 	if (!acc->buf_dev) {
 		err = -ENOMEM;
 		dev_err(hw->dev, "input device allocation failed\n");
-		goto clean_exit2;
+		goto clean_exit5;
 	}
 	acc->buf_dev->name = "asm_accbuf";
 	acc->buf_dev->id.bustype = BUS_I2C;
@@ -958,14 +944,14 @@ static int asm330_acc_gyro_early_buff_init(struct st_asm330lhh_hw *hw)
 		dev_err(hw->dev,
 				"unable to register input device %s\n",
 				acc->buf_dev->name);
-		goto clean_exit3;
+		goto clean_exit5;
 	}
 
 	gyro->buf_dev = input_allocate_device();
 	if (!gyro->buf_dev) {
 		err = -ENOMEM;
 		dev_err(hw->dev, "input device allocation failed\n");
-		goto clean_exit4;
+		goto clean_exit6;
 	}
 	gyro->buf_dev->name = "asm_gyrobuf";
 	gyro->buf_dev->id.bustype = BUS_I2C;
@@ -987,30 +973,30 @@ static int asm330_acc_gyro_early_buff_init(struct st_asm330lhh_hw *hw)
 		dev_err(hw->dev,
 				"unable to register input device %s\n",
 				gyro->buf_dev->name);
-		goto clean_exit5;
+		goto clean_exit6;
 	}
 
 	acc->buffer_asm_samples = true;
 	gyro->buffer_asm_samples = true;
 
 	return 1;
-clean_exit5:
+clean_exit6:
 	input_free_device(gyro->buf_dev);
-clean_exit4:
 	input_unregister_device(acc->buf_dev);
-clean_exit3:
+clean_exit5:
 	input_free_device(acc->buf_dev);
-clean_exit2:
+clean_exit4:
 	for (i = 0; i < ASM_MAXSAMPLE; i++)
 		kmem_cache_free(gyro->asm_cachepool,
 				gyro->asm_samplist[i]);
+clean_exit3:
 	kmem_cache_destroy(gyro->asm_cachepool);
-clean_exit1:
+clean_exit2:
 	for (i = 0; i < ASM_MAXSAMPLE; i++)
 		kmem_cache_free(acc->asm_cachepool,
 				acc->asm_samplist[i]);
+clean_exit1:
 	kmem_cache_destroy(acc->asm_cachepool);
-
 	return 0;
 }
 static void asm330_acc_gyro_input_cleanup(
